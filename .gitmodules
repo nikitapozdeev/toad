@@ -1,0 +1,9 @@
+[submodule "vendor/sdl2"]
+	path = vendor/sdl2
+	url = https://github.com/libsdl-org/SDL.git
+	branch = SDL2
+	shallow = true
+[submodule "vendor/lua"]
+	path = vendor/lua
+	url = https://github.com/lua/lua.git
+	shallow = true
