@@ -7,3 +7,6 @@
 	path = vendor/lua
 	url = https://github.com/lua/lua.git
 	shallow = true
+[submodule "vendor/quickjs"]
+	path = vendor/quickjs
+	url = https://github.com/bellard/quickjs.git

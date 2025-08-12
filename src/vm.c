@@ -1,13 +1,83 @@
 #include "vm.h"
-#include "api.h"
+#include "engine.h"
 #include "defs.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
+// Default palette (same as original PALETTE from api.c)
+static const u32 DEFAULT_PALETTE[PALETTE_SIZE] = {
+    0x000000, // 0  - Black
+    0x1D2B53, // 1  - Dark Blue
+    0x7E2553, // 2  - Dark Purple
+    0x008751, // 3  - Dark Green
+    0xAB5236, // 4  - Brown
+    0x5F574F, // 5  - Dark Gray
+    0xC2C3C7, // 6  - Light Gray
+    0xFFF1E8, // 7  - White
+    0xFF004D, // 8  - Red
+    0xFFA300, // 9  - Orange
+    0xFFEC27, // 10 - Yellow
+    0x00E436, // 11 - Green
+    0x29ADFF, // 12 - Blue
+    0x83769C, // 13 - Indigo
+    0xFF77A8, // 14 - Pink
+    0xFFCCAA  // 15 - Peach
+};
+
+VRAM *vram_create(void)
+{
+    VRAM *vram = malloc(sizeof(VRAM));
+    if (!vram)
+        return NULL;
+
+    // Allocate continuous memory block for graphics buffer and palette
+    vram->memory = malloc(VRAM_TOTAL_SIZE);
+    if (!vram->memory)
+    {
+        free(vram);
+        return NULL;
+    }
+
+    // Set up pointers within the memory block
+    vram->graphics = vram->memory;
+    vram->palette = (u32 *)(vram->memory + VRAM_GRAPHICS_SIZE);
+
+    // Initialize graphics buffer to black (color 0)
+    memset(vram->graphics, 0, VRAM_GRAPHICS_SIZE);
+
+    // Initialize palette with default colors
+    vram_init_default_palette(vram);
+
+    return vram;
+}
+
+void vram_destroy(VRAM *vram)
+{
+    if (vram)
+    {
+        if (vram->memory)
+        {
+            free(vram->memory);
+        }
+        free(vram);
+    }
+}
+
+void vram_init_default_palette(VRAM *vram)
+{
+    if (vram && vram->palette)
+    {
+        memcpy(vram->palette, DEFAULT_PALETTE, VRAM_PALETTE_SIZE);
+    }
+}
+
 VM *vm_create(SDL_Renderer *renderer, bool show_fps)
 {
     VM *vm = malloc(sizeof(VM));
+    if (!vm)
+        return NULL;
+
     vm->renderer = renderer;
     vm->running = true;
     vm->start_time = SDL_GetTicks(); // Remember startup time
@@ -17,16 +87,16 @@ VM *vm_create(SDL_Renderer *renderer, bool show_fps)
     vm->show_fps = show_fps;
     vm->frame_start_time = vm->start_time;
 
-    // Lua initialization
-    vm->L = luaL_newstate();
-    luaL_openlibs(vm->L);
+    // Initialize language engine to none
+    vm->engine = NULL;
 
-    // API registration
-    api_register(vm->L, vm);
-
-    // Graphics buffer
-    vm->pixels = malloc(SCREEN_W * SCREEN_H * sizeof(u8));
-    memset(vm->pixels, 0, SCREEN_W * SCREEN_H);
+    // Create VRAM
+    vm->vram = vram_create();
+    if (!vm->vram)
+    {
+        free(vm);
+        return NULL;
+    }
 
     return vm;
 }
@@ -35,27 +105,40 @@ void vm_destroy(VM *vm)
 {
     if (vm)
     {
-        if (vm->L)
+        // Destroy language engine
+        if (vm->engine)
         {
-            lua_close(vm->L);
+            vm->engine->destroy(vm->engine->engine_data);
+            free(vm->engine);
         }
-        if (vm->pixels)
+
+        if (vm->vram)
         {
-            free(vm->pixels);
+            vram_destroy(vm->vram);
         }
         free(vm);
     }
 }
 
-void vm_load_script(VM *vm, const char *filename)
+int vm_load_script(VM *vm, const char *filename)
 {
     vm->start_time = SDL_GetTicks();
 
-    if (luaL_dofile(vm->L, filename) != LUA_OK)
+    // Create engine based on file extension
+    vm->engine = create_engine_for_file(vm, filename);
+    if (!vm->engine)
     {
-        fprintf(stderr, "Lua error: %s\n", lua_tostring(vm->L, -1));
-        vm->running = false;
+        return -1;
     }
+
+    // Load script using engine interface
+    if (vm->engine->load_script(vm->engine->engine_data, filename) != 0)
+    {
+        vm->running = false;
+        return -1;
+    }
+
+    return 0;
 }
 
 void vm_process_events(VM *vm)
@@ -72,18 +155,12 @@ void vm_process_events(VM *vm)
 
 void vm_update(VM *vm)
 {
-    lua_getglobal(vm->L, "update");
-    if (lua_isfunction(vm->L, -1))
+    if (vm->engine)
     {
-        if (lua_pcall(vm->L, 0, 0, 0) != LUA_OK)
+        if (vm->engine->call_update(vm->engine->engine_data) != 0)
         {
-            fprintf(stderr, "Error in update(): %s\n", lua_tostring(vm->L, -1));
             vm->running = false;
         }
-    }
-    else
-    {
-        lua_pop(vm->L, 1);
     }
 }
 
@@ -92,19 +169,13 @@ void vm_render(VM *vm)
     // Remember frame start time
     vm->frame_start_time = SDL_GetTicks();
 
-    // Call draw() in Lua
-    lua_getglobal(vm->L, "draw");
-    if (lua_isfunction(vm->L, -1))
+    // Call draw() function using engine interface
+    if (vm->engine)
     {
-        if (lua_pcall(vm->L, 0, 0, 0) != LUA_OK)
+        if (vm->engine->call_draw(vm->engine->engine_data) != 0)
         {
-            fprintf(stderr, "Error in draw(): %s\n", lua_tostring(vm->L, -1));
             vm->running = false;
         }
-    }
-    else
-    {
-        lua_pop(vm->L, 1);
     }
 
     // Pixel rendering
@@ -116,13 +187,13 @@ void vm_render(VM *vm)
     {
         for (int x = 0; x < SCREEN_W; ++x)
         {
-            u8 palette_index = vm->pixels[y * SCREEN_W + x];
+            u8 palette_index = vm->vram->graphics[y * SCREEN_W + x];
 
             // Limit palette index to 0-15
             palette_index &= 0x0F;
 
-            // Get color from palette
-            u32 color = PALETTE[palette_index];
+            // Get color from VRAM palette
+            u32 color = vm->vram->palette[palette_index];
             u8 r = (color >> 16) & 0xFF;
             u8 g = (color >> 8) & 0xFF;
             u8 b = color & 0xFF;

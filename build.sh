@@ -15,7 +15,8 @@ gcc src/*.c \
     vendor/lua/lstrlib.c vendor/lua/ltable.c vendor/lua/ltablib.c \
     vendor/lua/ltm.c vendor/lua/lundump.c vendor/lua/lutf8lib.c \
     vendor/lua/lvm.c vendor/lua/lzio.c \
-    -Ivendor/lua \
+    -Ivendor/lua -Ivendor/quickjs \
+    vendor/quickjs/libquickjs.a \
     $(pkg-config --cflags --libs sdl2) \
-    -lm \
+    -lm -lpthread -ldl \
     -o toad
